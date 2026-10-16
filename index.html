@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GameSnacks 接入检测 Demo</title>
+  <style>
+    :root { color-scheme: light; --ink:#17211c; --muted:#5d6b64; --line:#d7e3dc; --bg:#f4f7f5; --card:#fff; --accent:#0f8a62; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:15px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color:var(--ink); background:var(--bg); }
+    header { padding:20px 24px 8px; }
+    h1 { margin:0 0 6px; font-size:22px; }
+    p { margin:0; color:var(--muted); }
+    main { display:grid; grid-template-columns:minmax(280px,420px) minmax(320px,1fr); gap:16px; padding:16px 24px 28px; }
+    section { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; }
+    h2 { margin:0 0 10px; font-size:16px; }
+    .status { display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid var(--line); }
+    .status b { font-weight:650; }
+    button, select { font:inherit; }
+    button { border:0; border-radius:9px; padding:8px 12px; background:var(--accent); color:#fff; cursor:pointer; }
+    button.secondary { background:#e7f3ee; color:#0d5c43; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .row { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+    canvas { width:100%; height:280px; background:#12352c; border-radius:12px; display:block; }
+    label { display:block; margin:10px 0 6px; color:var(--muted); }
+    select { width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); }
+    #log { height:220px; overflow:auto; background:#111a17; color:#d7f5ea; border-radius:10px; padding:10px; font:12px/1.45 ui-monospace, Consolas, monospace; white-space:pre-wrap; }
+    .warn { background:#fff7e8; border:1px solid #f0d7a2; color:#6d4e12; border-radius:10px; padding:10px 12px; margin-top:10px; }
+    @media (max-width:860px) { main { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>GameSnacks 接入检测 Demo</h1>
+    <p>用来检查 SDK 是否存在，以及激励广告只在看完后发奖。这不是 Google 登录页，也不会播出真实广告。</p>
+  </header>
+  <main>
+    <div>
+      <section>
+        <h2>接入检测，不是账号登录</h2>
+        <div class="status"><span>玩家登录接口</span><b>没有</b></div>
+        <div class="status"><span>真实 GameSnacks SDK</span><b id="sdkState">检测中</b></div>
+        <div class="status"><span>当前使用</span><b id="modeState">未注入</b></div>
+        <div class="status"><span>声音允许</span><b id="audioState">-</b></div>
+        <div class="status"><span>游戏状态</span><b id="playState">加载中</b></div>
+        <div class="warn">GameSnacks 禁止收集用户数据，也没有登录、账号或密码接口。本地打开时平台不会注入 SDK。下面的“模拟 SDK”只用于验证回调顺序。</div>
+        <div class="row">
+          <button id="injectBtn" type="button">注入模拟 SDK</button>
+          <button id="removeBtn" class="secondary" type="button">移除模拟 SDK</button>
+          <button id="muteBtn" class="secondary" type="button">模拟平台静音</button>
+          <button id="pauseBtn" class="secondary" type="button">模拟暂停</button>
+        </div>
+      </section>
+      <section style="margin-top:16px">
+        <h2>下一次广告结果</h2>
+        <label for="adResult">只影响模拟 SDK，不影响真实平台</label>
+        <select id="adResult">
+          <option value="viewed">有广告，玩家看完</option>
+          <option value="dismissed">有广告，玩家中途关闭</option>
+          <option value="none">当前没有广告</option>
+          <option value="error">广告请求失败</option>
+        </select>
+      </section>
+    </div>
+    <div>
+      <section>
+        <h2>小游戏</h2>
+        <canvas id="game" width="640" height="360"></canvas>
+        <div class="row">
+          <button id="rewardBtn" type="button">看广告，获得一次续关</button>
+          <button id="interstitialBtn" class="secondary" type="button">关卡结束插屏</button>
+          <button id="saveBtn" class="secondary" type="button">保存进度</button>
+          <button id="loadBtn" class="secondary" type="button">读取进度</button>
+        </div>
+        <p id="hud" style="margin-top:10px">分数 0 · 生命 3</p>
+      </section>
+      <section style="margin-top:16px">
+        <h2>调用日志</h2>
+        <div id="log"></div>
+      </section>
+    </div>
+  </main>
+  <script>
+    const logEl = document.querySelector("#log");
+    const state = { score: 0, lives: 3, paused: false, rewardVisible: false, usingMock: false };
+    const saveMem = {};
+
+    function log(message) {
+      const line = new Date().toLocaleTimeString() + "  " + message;
+      logEl.textContent = line + "\n" + logEl.textContent;
+    }
+
+    function readAudioEnabled() {
+      if (!window.GameSnacks) return null;
+      const value = window.GameSnacks.audio.isEnabled;
+      return typeof value === "function" ? value.call(window.GameSnacks.audio) : Boolean(value);
+    }
+
+    function refresh() {
+      const real = typeof window.GameSnacks !== "undefined" && !state.usingMock;
+      document.querySelector("#sdkState").textContent = window.GameSnacks ? (state.usingMock ? "否，当前是模拟" : "已检测到") : "未检测到";
+      document.querySelector("#modeState").textContent = state.usingMock ? "本地模拟 SDK" : (window.GameSnacks ? "外部 SDK" : "无 SDK");
+      const audio = readAudioEnabled();
+      document.querySelector("#audioState").textContent = audio === null ? "不可用" : (audio ? "开" : "关");
+      document.querySelector("#playState").textContent = state.paused ? "已暂停" : "可玩";
+      document.querySelector("#hud").textContent = "分数 " + state.score + " · 生命 " + state.lives + (state.rewardVisible ? " · 奖励按钮已显示" : "");
+      document.querySelector("#rewardBtn").disabled = !window.GameSnacks || state.paused;
+      document.querySelector("#interstitialBtn").disabled = !window.GameSnacks || state.paused;
+      draw();
+    }
+
+    function draw() {
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#12352c";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#f4fff8";
+      ctx.font = "28px sans-serif";
+      ctx.fillText(state.paused ? "平台已暂停" : "点击圆点得分", 36, 64);
+      ctx.font = "18px sans-serif";
+      ctx.fillStyle = "#b7e2d2";
+      ctx.fillText("生命耗尽后，只能等 adViewed 才续关", 36, 98);
+      ctx.beginPath();
+      ctx.fillStyle = state.lives > 0 ? "#3dd6a4" : "#d96b6b";
+      ctx.arc(120, 210, 42, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function installMock() {
+      if (window.GameSnacks && !state.usingMock) {
+        log("已存在外部 GameSnacks，未覆盖。");
+        return;
+      }
+      const audioSubs = [];
+      let audioEnabled = true;
+      const pauseSubs = [];
+      const resumeSubs = [];
+      const audio = {
+        subscribe(callback) { audioSubs.push(callback); log("audio.subscribe"); }
+      };
+      Object.defineProperty(audio, "isEnabled", { get() { return audioEnabled; } });
+      window.GameSnacks = {
+        ad: {
+          break(options) {
+            const result = document.querySelector("#adResult").value;
+            log("ad.break type=" + options.type + " name=" + (options.name || ""));
+            if (result === "error") {
+              options.adBreakDone && options.adBreakDone({ breakStatus: "error" });
+              log("adBreakDone error，不发奖励");
+              return;
+            }
+            if (result === "none") {
+              options.adBreakDone && options.adBreakDone({ breakStatus: "noAdPreloaded" });
+              log("没有广告，不调用 beforeReward");
+              state.rewardVisible = false;
+              refresh();
+              return;
+            }
+            if (options.type === "reward") {
+              log("beforeReward：现在才可以显示奖励按钮");
+              state.rewardVisible = true;
+              refresh();
+              options.beforeReward && options.beforeReward(() => {
+                log("玩家点击后调用 showAdFn");
+                showFakeAd(result === "viewed", () => {
+                  if (result === "viewed") {
+                    options.adViewed && options.adViewed();
+                    log("adViewed：可以发奖励");
+                  } else {
+                    options.adDismissed && options.adDismissed();
+                    log("adDismissed：不发奖励");
+                  }
+                  options.adBreakDone && options.adBreakDone({ breakStatus: result === "viewed" ? "viewed" : "dismissed" });
+                  state.rewardVisible = false;
+                  refresh();
+                });
+              });
+              return;
+            }
+            showFakeAd(true, () => {
+              options.beforeAd && options.beforeAd();
+              options.afterAd && options.afterAd();
+              options.adBreakDone && options.adBreakDone({ breakStatus: "viewed" });
+              log("插屏结束");
+            });
+          }
+        },
+        audio,
+        game: {
+          firstFrameReady() { log("game.firstFrameReady"); },
+          ready() { log("game.ready"); document.querySelector("#playState").textContent = "可玩"; },
+          onPause(callback) { pauseSubs.push(callback); log("game.onPause 已注册"); },
+          onResume(callback) { resumeSubs.push(callback); log("game.onResume 已注册"); }
+        },
+        score: { update(score) { log("score.update " + score); } },
+        storage: {
+          getItem(key) { log("storage.getItem " + key); return Object.prototype.hasOwnProperty.call(saveMem, key) ? saveMem[key] : null; },
+          setItem(key, value) { saveMem[key] = String(value); log("storage.setItem " + key); },
+          removeItem(key) { delete saveMem[key]; log("storage.removeItem " + key); },
+          clear() { Object.keys(saveMem).forEach((key) => delete saveMem[key]); log("storage.clear"); }
+        },
+        __mock: { audioSubs, pauseSubs, resumeSubs, setAudio(enabled) { audioEnabled = enabled; audioSubs.forEach((callback) => callback(enabled)); } }
+      };
+      state.usingMock = true;
+      log("已注入模拟 SDK。正式包不能包含这段模拟代码。");
+      refresh();
+    }
+
+    function showFakeAd(canFinish, done) {
+      const overlay = document.createElement("div");
+      overlay.style.cssText = "position:fixed;inset:0;background:rgba(8,16,13,.86);color:white;display:flex;align-items:center;justify-content:center;z-index:9";
+      overlay.innerHTML = "<div style='text-align:center;max-width:320px'><p>模拟广告</p><p style='color:#b7e2d2'>这不是真实广告</p><div style='display:flex;gap:8px;justify-content:center'><button id='finishAd'>看完</button><button id='closeAd'>中途关闭</button></div></div>";
+      document.body.appendChild(overlay);
+      overlay.querySelector("#finishAd").disabled = !canFinish;
+      overlay.querySelector("#finishAd").onclick = () => { overlay.remove(); done(true); };
+      overlay.querySelector("#closeAd").onclick = () => { overlay.remove(); done(false); };
+    }
+
+    function bootGame() {
+      if (!window.GameSnacks) {
+        log("没有 GameSnacks。请先注入模拟 SDK，或放到平台里再打开。");
+        refresh();
+        return;
+      }
+      window.GameSnacks.game.firstFrameReady();
+      window.GameSnacks.audio.subscribe(() => refresh());
+      window.GameSnacks.game.onPause(() => { state.paused = true; log("收到 onPause"); refresh(); });
+      window.GameSnacks.game.onResume(() => { state.paused = false; log("收到 onResume"); refresh(); });
+      window.GameSnacks.game.ready();
+      refresh();
+    }
+
+    document.querySelector("#game").addEventListener("click", () => {
+      if (!window.GameSnacks || state.paused || state.lives <= 0) return;
+      state.score += 1;
+      window.GameSnacks.score.update(state.score);
+      if (state.score % 5 === 0) {
+        state.lives -= 1;
+        log("生命减少，当前 " + state.lives);
+      }
+      refresh();
+    });
+
+    document.querySelector("#rewardBtn").onclick = () => {
+      if (!window.GameSnacks) return;
+      state.rewardVisible = false;
+      window.GameSnacks.ad.break({
+        type: "reward",
+        name: "extra-life",
+        beforeReward(showAdFn) {
+          const button = document.querySelector("#rewardBtn");
+          const original = button.onclick;
+          button.textContent = "确认观看";
+          button.onclick = () => {
+            button.textContent = "看广告，获得一次续关";
+            button.onclick = original;
+            showAdFn();
+          };
+        },
+        adViewed() { state.lives += 1; log("游戏发奖：生命 +1"); refresh(); },
+        adDismissed() { log("游戏不发奖"); },
+        adBreakDone() { log("奖励广告流程结束"); refresh(); }
+      });
+    };
+
+    document.querySelector("#interstitialBtn").onclick = () => {
+      window.GameSnacks.ad.break({ type: "next", name: "level-end", beforeAd() { log("beforeAd 暂停"); }, afterAd() { log("afterAd 恢复"); } });
+    };
+    document.querySelector("#saveBtn").onclick = () => window.GameSnacks.storage.setItem("progress", JSON.stringify({ score: state.score, lives: state.lives }));
+    document.querySelector("#loadBtn").onclick = () => {
+      const raw = window.GameSnacks.storage.getItem("progress");
+      if (!raw) { log("没有存档"); return; }
+      const data = JSON.parse(raw);
+      state.score = data.score;
+      state.lives = data.lives;
+      refresh();
+    };
+    document.querySelector("#injectBtn").onclick = () => { installMock(); bootGame(); };
+    document.querySelector("#removeBtn").onclick = () => {
+      if (state.usingMock) { delete window.GameSnacks; state.usingMock = false; log("已移除模拟 SDK"); }
+      refresh();
+    };
+    document.querySelector("#muteBtn").onclick = () => {
+      if (!state.usingMock) { log("只有模拟 SDK 可以切换平台静音"); return; }
+      const next = !readAudioEnabled();
+      window.GameSnacks.__mock.setAudio(next);
+      log("平台静音切换为 " + (next ? "有声" : "静音"));
+      refresh();
+    };
+    document.querySelector("#pauseBtn").onclick = () => {
+      if (!state.usingMock) return;
+      if (!state.paused) window.GameSnacks.__mock.pauseSubs.forEach((callback) => callback());
+      else window.GameSnacks.__mock.resumeSubs.forEach((callback) => callback());
+    };
+
+    log("页面打开。GameSnacks 不会在本地自动注入。");
+    refresh();
+    if (window.GameSnacks) bootGame();
+  </script>
+</body>
+</html>
